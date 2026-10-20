@@ -59,6 +59,8 @@ public class MainActivity extends Activity {
     LinearLayout selBar, selBar2;
     GridAdapter adapter;
     String album = "", cursor = "", ownerFilter = "";
+    int personId = 0;
+    String personName = "";
     int tabW = 0;   // 七个 tab 平分一屏的宽度
     boolean secret = false, loading = false, done = false;
     int gen = 0;
@@ -75,6 +77,9 @@ public class MainActivity extends Activity {
         album = getIntent().getStringExtra("album");
         if (album == null) album = "";
         secret = getIntent().getBooleanExtra("secret", false);
+        personId = getIntent().getIntExtra("person", 0);
+        personName = getIntent().getStringExtra("person_name");
+        if (personName == null) personName = "人物";
         ownerFilter = getIntent().getStringExtra("owner");
         if (ownerFilter == null) ownerFilter = "";
 
@@ -161,7 +166,8 @@ public class MainActivity extends Activity {
         top.setGravity(Gravity.CENTER_VERTICAL);
         top.setPadding(24, 36, 18, 6);
         title = new TextView(this);
-        title.setText(secret ? "秘密相册"
+        title.setText(personId > 0 ? personName
+                : secret ? "秘密相册"
                 : ("family".equals(ownerFilter) ? "家庭共享"
                 : (album.isEmpty() ? "照片" : album)));
         title.setTextColor(Color.WHITE);
@@ -172,6 +178,16 @@ public class MainActivity extends Activity {
         account.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) { showAccountMenu(); }
         });
+        android.widget.TextView peopleBtn = Ui.chip(this, "✨ 智能");
+        peopleBtn.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                startActivity(new Intent(MainActivity.this, SmartActivity.class));
+            }
+        });
+        LinearLayout.LayoutParams plp2 = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        plp2.setMargins(0, 0, dp(8), 0);
+        top.addView(peopleBtn, plp2);
         top.addView(account);
         root.addView(top);
 
@@ -627,6 +643,7 @@ public class MainActivity extends Activity {
                         q.append("&folder=").append(java.net.URLEncoder.encode(album, "UTF-8"));
                     // 秘密相册只查 secret=1（这行之前丢了，导致秘密里显示全部照片）
                     if (secret) q.append("&secret=1");
+                    if (personId > 0) q.append("&person=").append(personId);
                     if (!ownerFilter.isEmpty())
                         q.append("&owner=").append(java.net.URLEncoder.encode(ownerFilter, "UTF-8"));
                     if (!cursor.isEmpty())

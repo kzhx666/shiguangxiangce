@@ -43,7 +43,7 @@ if ($LASTEXITCODE -ne 0) { throw "aapt2 link 失败" }
 
 # 3) 编译 Java
 $srcs = Get-ChildItem (Join-Path $proj "src") -Recurse -Filter *.java | ForEach-Object { $_.FullName }
-& javac -source 8 -target 8 -nowarn -bootclasspath $jar -d (Join-Path $build "classes") @srcs 2>&1 |
+& javac -source 8 -target 8 -nowarn -Xlint:none -bootclasspath $jar -d (Join-Path $build "classes") @srcs 2>&1 |
     Where-Object { $_ -match 'error|错误' } | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { throw "javac 失败" }
 
