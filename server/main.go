@@ -587,10 +587,19 @@ func (s *Server) deleteFolder(w http.ResponseWriter, name string) {
 }
 
 func (s *Server) deleteFolderFor(w http.ResponseWriter, r *http.Request, name string) {
-	// 共享空间里的文件夹不能只按 visibleOwners 过滤，否则 owner='family' 的行永远删不掉
+	// 三个分区必须严格隔离，否则在共享里删文件夹会把原图一起删掉（曾经发生过）
+	qv := r.URL.Query()
 	clause, args := ownerIn(s.visibleOwners(r, ""))
-	if r.URL.Query().Get("owner") == "family" {
+	switch {
+	case qv.Get("owner") == "family":
 		clause = ` AND owner='family'`
+		args = nil
+	case qv.Get("secret") == "1":
+		clause = ` AND secret=1 AND owner<>'family'`
+		args = nil
+	default:
+		// 普通分区：绝不碰共享和秘密
+		clause = ` AND owner<>'family' AND secret=0`
 		args = nil
 	}
 	q := `SELECT id FROM assets WHERE status='active' AND folder=?` + clause

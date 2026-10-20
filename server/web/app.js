@@ -1274,10 +1274,11 @@ let fAll = [];
 
 function fSyncBar(){
   const n = fSel.size;
-  const cnt = $('#fSelCount'), del = $('#fDel'), sec = $('#fSec');
+  const cnt = $('#fSelCount'), del = $('#fDel'), sec = $('#fSec'), fam = $('#fFam');
   if (cnt) cnt.textContent = n ? ('已选 ' + n + ' 个分区') : '未选';
   if (del) del.disabled = n === 0;
   if (sec) sec.disabled = n === 0;
+  if (fam) fam.disabled = n === 0;
   document.querySelectorAll('#folderList .fchk').forEach(c => {
     c.classList.toggle('on', fSel.has(c.dataset.chk));
   });
@@ -1289,6 +1290,9 @@ function fToggle(name){
 }
 
 async function fBatchDelete(){
+  // 关键：带上分区参数，否则「共享里删文件夹」会把普通相册的同一文件夹一起删掉
+  const fq = state.family ? '?owner=family' : (state.secret ? '?secret=1' : '');
+
   const names = [...fSel];
   if (!names.length) return;
   const ok = await uiConfirm('删除 ' + names.length + ' 个分区？',
@@ -1298,13 +1302,32 @@ async function fBatchDelete(){
   let moved = 0, fail = 0;
   for (const n of names) {
     try {
-      const r = await api('/api/folders/' + encodeURIComponent(n), { method: 'DELETE' });
+      const r = await api('/api/folders/' + encodeURIComponent(n) + fq, { method: 'DELETE' });
       moved += (r.moved || 0);
     } catch (e) { fail++; }
   }
   fSel.clear();
   toast('已删除 ' + (names.length - fail) + ' 个分区，' + moved + ' 项移入回收站' +
         (fail ? '，失败 ' + fail + ' 个' : ''));
+  await refreshFolders();
+  reset();
+}
+
+/** 把选中的文件夹整个推送到家庭共享空间（服务器做硬链接，不占额外空间） */
+async function fBatchFamily(){
+  const names = [...fSel];
+  if (!names.length) return;
+  let pushed = 0, total = 0, fail = 0;
+  for (const n of names) {
+    try {
+      const r = await api('/api/family/folder', { method: 'POST',
+        body: JSON.stringify({ name: n }) });
+      pushed += (r.pushed || 0);
+      total += (r.total || 0);
+    } catch (e) { fail++; }
+  }
+  fSel.clear();
+  toast('已推送 ' + pushed + ' / ' + total + ' 张到家庭共享' + (fail ? '（失败 ' + fail + ' 个分区）' : ''));
   await refreshFolders();
   reset();
 }
@@ -1386,6 +1409,7 @@ $('#fSelAll').onclick = () => { fAll.forEach(n => fSel.add(n)); fSyncBar(); };
 $('#fSelNone').onclick = () => { fSel.clear(); fSyncBar(); };
 $('#fDel').onclick = () => fBatchDelete();
 $('#fSec').onclick = () => fBatchSecret();
+$('#fFam').onclick = () => fBatchFamily();
 
 $('#btnFolder').onclick = async () => {
   await refreshFolders();

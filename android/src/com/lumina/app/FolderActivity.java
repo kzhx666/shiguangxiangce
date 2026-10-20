@@ -52,11 +52,11 @@ public class FolderActivity extends Activity {
         selBar.setGravity(Gravity.CENTER_VERTICAL);
         selBar.setPadding(24, 4, 24, 4);
         selBar.setVisibility(View.GONE);
-        selCount = Ui.label(this, "", 12, 0xFF2DD4BF);
+        selCount = Ui.label(this, "", 11, 0xFF2DD4BF);
         LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
         selBar.addView(selCount, slp);
-        TextView delSel = Ui.chip(this, "删除文件夹");
+        TextView delSel = Ui.chip(this, "删除");
         delSel.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) { deleteSelected(); }
         });
@@ -66,11 +66,11 @@ public class FolderActivity extends Activity {
                 selFolder.clear(); selBar.setVisibility(View.GONE); load();
             }
         });
-        TextView secSel = Ui.chip(this, "移入秘密");
+        TextView secSel = Ui.chip(this, "入秘密");
         secSel.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) { secretSelected(); }
         });
-        android.widget.TextView pushSel = Ui.chip(this, "推送到共享");
+        android.widget.TextView pushSel = Ui.chip(this, "推共享");
         pushSel.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) { pushSelected(); }
         });

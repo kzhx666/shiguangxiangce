@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-
 	"sync"
 	"crypto/hmac"
 	"crypto/rand"
