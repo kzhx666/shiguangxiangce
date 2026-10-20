@@ -66,7 +66,7 @@ public class FolderActivity extends Activity {
                 selFolder.clear(); selBar.setVisibility(View.GONE); load();
             }
         });
-        TextView secSel = Ui.chip(this, "入秘密");
+        TextView secSel = Ui.chip(this, secretMode ? "出秘密" : "入秘密");
         secSel.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) { secretSelected(); }
         });

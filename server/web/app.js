@@ -1277,7 +1277,11 @@ function fSyncBar(){
   const cnt = $('#fSelCount'), del = $('#fDel'), sec = $('#fSec'), fam = $('#fFam');
   if (cnt) cnt.textContent = n ? ('已选 ' + n + ' 个分区') : '未选';
   if (del) del.disabled = n === 0;
-  if (sec) sec.disabled = n === 0;
+  if (sec) {
+    sec.disabled = n === 0;
+    // 已经在秘密相册里，按钮应该是「移出」
+    sec.textContent = state.secret ? '移除私密' : '移入秘密';
+  }
   if (fam) fam.disabled = n === 0;
   document.querySelectorAll('#folderList .fchk').forEach(c => {
     c.classList.toggle('on', fSel.has(c.dataset.chk));
