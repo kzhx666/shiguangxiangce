@@ -1,0 +1,63 @@
+#!/bin/sh /etc/rc.common
+# LuminaGallery 服务脚本（procd）
+#
+# 安装：
+#   cp lumina.init /etc/init.d/lumina && chmod +x /etc/init.d/lumina
+#   /etc/init.d/lumina enable
+#   /etc/init.d/lumina start
+#
+# 说明：本脚本假设程序在 /mnt/sda1/.lumina/bin/lumina。外接盘挂载较慢时，
+# 启动阶段会最多等待 30 秒，避免 procd 在磁盘就绪前反复重启。
+
+START=95
+STOP=10
+USE_PROCD=1
+
+PROG=/mnt/sda1/.lumina/bin/lumina
+ROOT_DIR=/mnt/sda1
+DATA_DIR=/mnt/sda1/.lumina
+CACHE_DIR=/mnt/sda1/.lumina_cache
+ADDR=:8088
+THUMB_CONC=2
+
+start_service() {
+	local i=0
+	while [ ! -x "$PROG" ] && [ $i -lt 30 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+
+	if [ ! -x "$PROG" ]; then
+		logger -t lumina "程序不存在或不可执行：$PROG"
+		return 1
+	fi
+
+	# 数据目录不在，说明盘没挂上，别启动，否则会写到 eMMC 上
+	if [ ! -d "$ROOT_DIR/lwm" ] && [ ! -d "$ROOT_DIR/cr" ]; then
+		mkdir -p "$ROOT_DIR/lwm" "$ROOT_DIR/cr" "$ROOT_DIR/家庭共享" 2>/dev/null
+	fi
+
+	procd_open_instance lumina
+	procd_set_param command "$PROG" \
+		-root "$ROOT_DIR" \
+		-data "$DATA_DIR" \
+		-cache "$CACHE_DIR" \
+		-addr "$ADDR" \
+		-thumb-conc "$THUMB_CONC"
+	procd_set_param respawn 3600 5 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param file "$PROG"
+	procd_set_param limits nofile="8192 8192"
+	procd_close_instance
+
+	logger -t lumina "启动于 $ADDR，根目录 $ROOT_DIR"
+}
+
+stop_service() {
+	logger -t lumina "停止"
+}
+
+service_triggers() {
+	procd_add_reload_trigger lumina
+}
