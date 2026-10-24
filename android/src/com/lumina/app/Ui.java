@@ -15,7 +15,8 @@ public class Ui {
         t.setTextSize(13);
         t.setTextColor(0xFFE8ECF4);
         t.setGravity(Gravity.CENTER);
-        t.setPadding(30, 18, 30, 18);
+        int d=(int)(c.getResources().getDisplayMetrics().density*12);
+        t.setPadding(d,d/2,d,d/2);t.setMinHeight((int)(48*c.getResources().getDisplayMetrics().density));
         android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
         bg.setColor(0xFF171B23);
         bg.setCornerRadius(99);

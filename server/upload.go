@@ -1,12 +1,12 @@
 package main
 
 import (
-	"sync"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"net/http"
@@ -15,12 +15,13 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	maxUploadSize   = 32 << 30     // 单文件上限 32 GB
-	uploadTempDir   = ".lumina/tmp" // 相对 root
+	maxUploadSize = 32 << 30      // 单文件上限 32 GB
+	uploadTempDir = ".lumina/tmp" // 相对 root
 )
 
 var uploadChunkPool = sync.Pool{
@@ -28,7 +29,6 @@ var uploadChunkPool = sync.Pool{
 		return make([]byte, 4<<20)
 	},
 }
-
 
 type uploadRow struct {
 	SID     string
@@ -120,18 +120,24 @@ func countBits(bitsHex string) int {
 // ---------- handlers ----------
 
 func (s *Server) hUploadInit(w http.ResponseWriter, r *http.Request) {
+	memberUploadMu.Lock()
+	defer memberUploadMu.Unlock()
 	var req struct {
-		Owner string `json:"owner"`
-		Name  string `json:"name"`
-		Size  int64  `json:"size"`
-		MTime  int64  `json:"mtime"`
-		Folder string `json:"folder"`
-		Sub    string `json:"sub"`
-		Secret bool   `json:"secret"`
-	Dur    float64 `json:"dur"`
+		Owner  string  `json:"owner"`
+		Name   string  `json:"name"`
+		Size   int64   `json:"size"`
+		MTime  int64   `json:"mtime"`
+		Folder string  `json:"folder"`
+		Sub    string  `json:"sub"`
+		Secret bool    `json:"secret"`
+		Dur    float64 `json:"dur"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "bad json", 400)
+		return
+	}
+	if !canSee(userOf(r), req.Owner) {
+		http.Error(w, "forbidden", 403)
 		return
 	}
 	if !validOwner(req.Owner) {
@@ -143,32 +149,28 @@ func (s *Server) hUploadInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chunk := s.cfg.UploadChunk
-	if chunk < 256<<10 { chunk = 256 << 10 }
-	if chunk > 64<<20 { chunk = 64 << 20 }
+	if chunk < 256<<10 {
+		chunk = 256 << 10
+	}
+	if chunk > 64<<20 {
+		chunk = 64 << 20
+	}
 	total := int((req.Size + chunk - 1) / chunk)
 	name := sanitizeName(req.Name)
-
-	// ---------- 秒传检查：如果库里已经有该用户的同名同大小有效资产，直接返回秒传成功 ----------
-	var existID int64
-	if err := s.st.db.QueryRow(
-		`SELECT id FROM assets WHERE owner=? AND name=? AND size=? AND status='active' LIMIT 1`,
-		req.Owner, name, req.Size).Scan(&existID); err == nil && existID > 0 {
-		writeJSON(w, map[string]any{"ok": true, "dedup": true, "asset": existID})
-		return
-	}
-	if err := s.st.db.QueryRow(
-		`SELECT a.id FROM asset_names an JOIN assets a ON an.asset_id=a.id WHERE a.owner=? AND an.name=? AND an.size=? AND a.status='active' LIMIT 1`,
-		req.Owner, name, req.Size).Scan(&existID); err == nil && existID > 0 {
-		writeJSON(w, map[string]any{"ok": true, "dedup": true, "asset": existID})
-		return
-	}
 
 	// ---------- 断点续传：同一个文件（owner+name+size）24 小时内复用旧会话 ----------
 	var oldSID, oldBits string
 	if err := s.st.db.QueryRow(
-		`SELECT sid, bits FROM uploads WHERE owner=? AND name=? AND size=? AND created > ? ORDER BY created DESC LIMIT 1`,
-		req.Owner, name, req.Size, time.Now().Add(-24*time.Hour).Unix()).Scan(&oldSID, &oldBits); err == nil {
+		`SELECT sid, bits FROM uploads WHERE owner=? AND name=? AND size=? AND mtime=? AND folder=? AND sub=? AND secret=? AND created > ? ORDER BY created DESC LIMIT 1`,
+		req.Owner, name, req.Size, req.MTime, req.Folder, req.Sub, boolInt(req.Secret), time.Now().Add(-24*time.Hour).Unix()).Scan(&oldSID, &oldBits); err == nil {
 		if _, statErr := os.Stat(filepath.Join(s.cfg.Root, uploadTempDir, oldSID+".part")); statErr == nil {
+			old, e := s.loadUpload(oldSID)
+			if e != nil {
+				http.Error(w, "session error", 500)
+				return
+			}
+			chunk = old.Chunk
+			total = old.Total
 			var got []int
 			for i := 0; i < total; i++ {
 				if hasBit(oldBits, i) {
@@ -182,6 +184,10 @@ func (s *Server) hUploadInit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !s.quotaAllows(req.Owner, req.Size) {
+		http.Error(w, "空间配额不足", 409)
+		return
+	}
 	sid := randomHex(16)
 	dir := filepath.Join(s.cfg.Root, uploadTempDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -210,6 +216,8 @@ func (s *Server) hUploadInit(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hUploadChunk(w http.ResponseWriter, r *http.Request) {
 	sid := r.PathValue("sid")
+	unlock := uploadLock(sid)
+	defer unlock()
 	idx, err := strconv.Atoi(r.PathValue("idx"))
 	if err != nil {
 		http.Error(w, "bad idx", 400)
@@ -218,6 +226,10 @@ func (s *Server) hUploadChunk(w http.ResponseWriter, r *http.Request) {
 	row, err := s.loadUpload(sid)
 	if err != nil {
 		http.Error(w, "no session", 404)
+		return
+	}
+	if !canSee(userOf(r), row.Owner) {
+		http.Error(w, "forbidden", 403)
 		return
 	}
 	if idx < 0 || idx >= row.Total {
@@ -235,6 +247,14 @@ func (s *Server) hUploadChunk(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
 		http.Error(w, "read failed", 400)
+		return
+	}
+	expected := row.Chunk
+	if left := row.Size - int64(idx)*row.Chunk; left < expected {
+		expected = left
+	}
+	if int64(n) != expected {
+		http.Error(w, "incorrect chunk length", 400)
 		return
 	}
 	if n == 0 {
@@ -259,9 +279,15 @@ func (s *Server) hUploadChunk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hUploadStatus(w http.ResponseWriter, r *http.Request) {
+	unlock := uploadLock(r.PathValue("sid"))
+	defer unlock()
 	row, err := s.loadUpload(r.PathValue("sid"))
 	if err != nil {
 		http.Error(w, "no session", 404)
+		return
+	}
+	if !canSee(userOf(r), row.Owner) {
+		http.Error(w, "forbidden", 403)
 		return
 	}
 	got := []int{}
@@ -276,6 +302,13 @@ func (s *Server) hUploadStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hUploadAbort(w http.ResponseWriter, r *http.Request) {
 	sid := r.PathValue("sid")
+	unlock := uploadLock(sid)
+	defer unlock()
+	row, e := s.loadUpload(sid)
+	if e != nil || !canSee(userOf(r), row.Owner) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
 	_ = os.Remove(filepath.Join(s.cfg.Root, uploadTempDir, sid+".part"))
 	_, _ = s.st.db.Exec(`DELETE FROM uploads WHERE sid=?`, sid)
 	writeJSON(w, map[string]any{"ok": true})
@@ -283,14 +316,20 @@ func (s *Server) hUploadAbort(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hUploadComplete(w http.ResponseWriter, r *http.Request) {
 	sid := r.PathValue("sid")
+	unlock := uploadLock(sid)
+	defer unlock()
 	row, err := s.loadUpload(sid)
 	if err != nil {
 		http.Error(w, "no session", 404)
 		return
 	}
+	if !canSee(userOf(r), row.Owner) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
 	// 磁盘上的实际大小才是权威：只要大小对得上就不必依赖位图，
 	// 客户端漏报/丢包补传都能自愈。
-	if sizeOf(filepath.Join(s.cfg.Root, uploadTempDir, sid+".part")) != row.Size &&
+	if sizeOf(filepath.Join(s.cfg.Root, uploadTempDir, sid+".part")) != row.Size ||
 		countBits(row.Bits) < row.Total {
 		http.Error(w, "incomplete", 409)
 		return
@@ -308,9 +347,9 @@ func (s *Server) hUploadComplete(w http.ResponseWriter, r *http.Request) {
 		_, _ = s.st.db.Exec(`INSERT OR IGNORE INTO asset_names(asset_id,name,size) VALUES(?,?,?)`,
 			id, row.Name, row.Size)
 	}
-		// 如果去重到的那份资产在回收站里，把它恢复出来：
-		// 否则 alias 记录挂在一个非 active 的资产上，对账依然认为没备份
-		_, _ = s.st.db.Exec(`UPDATE assets SET status='active', missing=0, missing_since=0 WHERE id=? AND status<>'active'`, id)
+	// 如果去重到的那份资产在回收站里，把它恢复出来：
+	// 否则 alias 记录挂在一个非 active 的资产上，对账依然认为没备份
+	_, _ = s.st.db.Exec(`UPDATE assets SET status='active', missing=0, missing_since=0 WHERE id=? AND status<>'active'`, id)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -339,10 +378,10 @@ func (s *Server) finalizeUpload(row *uploadRow) (int64, bool, error) {
 			_, _ = s.st.db.Exec(`UPDATE assets SET folder=?, sub=? WHERE id=?`, row.Folder, row.Sub, id)
 		}
 		// 秒传也要应用"备份到秘密相册"：否则重传已存在的文件永远进不了秘密相册
-	// 手机端报上来的视频时长比路由器现场探测可靠
-	if row.Dur > 0 {
-		_, _ = s.st.db.Exec(`UPDATE assets SET duration=? WHERE id=? AND (duration IS NULL OR duration<=0)`, row.Dur, id)
-	}
+		// 手机端报上来的视频时长比路由器现场探测可靠
+		if row.Dur > 0 {
+			_, _ = s.st.db.Exec(`UPDATE assets SET duration=? WHERE id=? AND (duration IS NULL OR duration<=0)`, row.Dur, id)
+		}
 		if row.Secret == 1 {
 			_, _ = s.st.db.Exec(`UPDATE assets SET secret=1 WHERE id=?`, id)
 		}
@@ -473,29 +512,28 @@ func (s *Server) insertUploadedSecret(rel, sum string, pr *Probe, t time.Time, f
 }
 
 func validOwner(o string) bool {
-	return o == "lwm" || o == "cr" || o == "family"
+	for _, d := range ownerDefs() {
+		if d.Owner == o {
+			return true
+		}
+	}
+	return false
 }
 
 func ownerOf(rel string) string {
-	switch {
-	case strings.HasPrefix(rel, "lwm/"):
-		return "lwm"
-	case strings.HasPrefix(rel, "cr/"):
-		return "cr"
-	default:
-		return "family"
+	rel = filepath.ToSlash(rel)
+	for _, d := range ownerDefs() {
+		if strings.HasPrefix(rel, d.Dir+"/") {
+			return d.Owner
+		}
 	}
+	return "family"
 }
-
 func baseDirFor(owner string) string {
-	switch owner {
-	case "lwm":
-		return filepath.Join("lwm", "手机照片与视频备份")
-	case "cr":
-		return filepath.Join("cr", "手机照片与视频备份")
-	default:
+	if owner == "family" {
 		return "家庭共享"
 	}
+	return filepath.Join(owner, "手机照片与视频备份")
 }
 
 // archiveFile 按拍摄时间归档到 base/YYYY年/YYYY-MM月/，返回相对路径。
@@ -642,17 +680,31 @@ func (s *Server) sweepUploads() {
 	rows.Close()
 
 	for _, c := range list {
-		part := filepath.Join(s.cfg.Root, uploadTempDir, c.sid+".part")
-		fi, err := os.Stat(part)
-		if err != nil || fi.Size() != c.size || c.size == 0 {
-			continue
-		}
-		row, err := s.loadUpload(c.sid)
-		if err != nil {
-			continue
-		}
-		if _, _, err := s.finalizeUpload(row); err == nil {
-			log.Printf("sweep: finalized stuck upload %s (%d bytes)", c.sid[:8], c.size)
-		}
+		func() {
+			unlock := uploadLock(c.sid)
+			defer unlock()
+			part := filepath.Join(s.cfg.Root, uploadTempDir, c.sid+".part")
+			fi, err := os.Stat(part)
+			if err != nil || fi.Size() != c.size || c.size == 0 {
+				return
+			}
+			row, err := s.loadUpload(c.sid)
+			if err != nil || countBits(row.Bits) < row.Total {
+				return
+			}
+			if _, _, err := s.finalizeUpload(row); err == nil {
+				log.Printf("sweep: finalized stuck upload %s (%d bytes)", c.sid[:8], c.size)
+			}
+		}()
 	}
+}
+
+var uploadLocks [64]sync.Mutex
+
+func uploadLock(sid string) func() {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(sid))
+	m := &uploadLocks[h.Sum32()%64]
+	m.Lock()
+	return m.Unlock
 }

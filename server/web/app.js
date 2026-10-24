@@ -80,7 +80,9 @@ async function load() {
     if (state.secret) q.set('secret', '1');
     if (state.family) { q.set('owner', 'family'); q.delete('secret'); }
     if (state.cursor) q.set('before', state.cursor);
+    for (const k of ['q','from','to','fav']) if (state.search && state.search[k]) q.set(k,state.search[k]);
     const r = await api('/api/timeline?' + q);
+    if (state.again) return;
     const fresh = r.items || [];
     const wasEmpty = state.items.length === 0;
     state.items = state.items.concat(fresh);
@@ -97,7 +99,7 @@ async function load() {
       chain = 0;
     }
   } catch (e) {
-    console.error(e);
+    console.error(e); toast("加载失败，请检查连接后重试");
   } finally {
     state.loading = false;
     if (state.again) { state.again = false; reset(); }
@@ -106,7 +108,7 @@ async function load() {
 
 function showEmpty() {
   $('#stream').innerHTML = '<div class="empty"><b>还没有媒体</b>' +
-    '把照片放进 <code>/mnt/sda1/lwm/手机照片与视频备份/</code> 后点右上角重新扫描</div>';
+    '上传照片开始记录，或清除搜索条件查看其他照片。</div>';
 }
 
 /* ---- 渲染 ---- */
@@ -480,7 +482,7 @@ function toast(msg){
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
 }
 
-function curOwner(){ return state.owner === 'all' ? 'lwm' : state.owner; }
+function curOwner(){ return state.owner === 'all' ? (state.owners.find(o=>o.owner!=='family')||state.owners[0]||{}).owner : state.owner; }
 
 function idb(){ return new Promise((res, rej) => { const r = indexedDB.open('lumina', 1);
   r.onupgradeneeded = () => { r.result.createObjectStore('up', { keyPath: 'id' }); };
@@ -525,7 +527,7 @@ async function addFiles(list){
       /\.(jpe?g|png|heic|heif|webp|gif|bmp|tiff?|dng|raw|cr2|nef|arw|mp4|mov|m4v|3gp|mkv|avi)$/i.test(f.name);
     if (!ok || f.size === 0) continue;
     const item = { id: 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
-      name: f.name, size: f.size, owner: (uploadOwner || curOwner()), file: f, sid: '',
+      user: localStorage.getItem('lumina_user') || '', secret: !!window.__uploadSecret, status: 'queued', progress: 0, name: f.name, size: f.size, owner: (uploadOwner || curOwner()), file: f, sid: '',
       // 文件本身的修改时间（手机上的拍摄/保存时间），不是上传时间
       mtime: Math.floor((f.lastModified || Date.now()) / 1000),
       dir: (f.webkitRelativePath || '').split('/').slice(0, -1).join('/') || '' };
@@ -544,96 +546,47 @@ async function addFiles(list){
 }
 
 async function uploadOne(item){
-  if (!item.sid){
-    const r = await api('/api/upload/init', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ owner: item.owner, name: item.name, size: item.size, mtime: item.mtime || 0,
-      folder: (item.dir || '').split('/')[0] || '',
-      sub: (item.dir || '').split('/').slice(1).join('/'),
-      secret: !!window.__uploadSecret }) });
-    item.sid = r.sid; item.total = r.total; item.chunk = r.chunk;
-    await idbPut(item);
+  const persist = async()=>{try{await idbPut(item);}catch(e){item.warning='浏览器无法保存任务，请保持页面打开';}};
+  const check=()=>{if(item.status==='paused'||item.status==='cancelled')throw new Error(item.status);};
+  item.status='uploading'; item.error=''; await persist();
+  let st;
+  if(item.sid){try{st=await api('/api/upload/'+item.sid);}catch(e){if(!String(e).includes('404'))throw e;item.sid='';}}
+  if(!item.sid){
+    st=await api('/api/upload/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({owner:item.owner,name:item.name,size:item.size,mtime:item.mtime,folder:(item.dir||'').split('/')[0]||'',sub:(item.dir||'').split('/').slice(1).join('/'),secret:item.secret})});
+    if(st.dedup){item.progress=item.size;return st;} item.sid=st.sid;
   }
-  const st = await api('/api/upload/' + item.sid);
-  item.total = st.total; item.chunk = st.chunk;
-  const have = new Set(st.received || []);
-  $('#hudName').textContent = item.name;
-
-  let next = 0, failed = 0;
-  const CONC = 3;
-  async function worker(){
-    while (true){
-      const i = next++;
-      if (i >= item.total) return;
-      const start = i * item.chunk, end = Math.min(item.size, start + item.chunk);
-      if (have.has(i)){ UP.doneBytes += (end - start); updateHud(); continue; }
-      const blob = item.file.slice(start, end);
-      let tries = 0;
-      while (true){
-        try {
-          const res = await fetch('/api/upload/' + item.sid + '/' + i, { method: 'PUT', body: blob });
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          break;
-        } catch (e){
-          if (++tries >= 3){ failed++; throw e; }
-          await new Promise(r => setTimeout(r, 300 * tries));
-        }
-      }
-      UP.doneBytes += (end - start);
-      tickSpeed(); updateHud();
+  item.total=st.total;item.chunk=st.chunk;
+  const have=new Set(st.received||[]);item.progress=0;
+  have.forEach(i=>item.progress+=Math.min(item.chunk,item.size-i*item.chunk));await persist();
+  for(let i=0;i<item.total;i++){
+    check();if(have.has(i))continue;
+    const start=i*item.chunk,end=Math.min(item.size,start+item.chunk);
+    for(let retry=0;;retry++){
+      check();
+      try{const res=await fetch('/api/upload/'+item.sid+'/'+i,{method:'PUT',body:item.file.slice(start,end)});if(!res.ok)throw new Error('HTTP '+res.status);break;}
+      catch(e){if(retry>=2||/40[0139]/.test(String(e)))throw e;await new Promise(r=>setTimeout(r,1000*2**retry));}
     }
+    item.progress+=end-start; UP.doneBytes=UP.items.reduce((n,t)=>n+(t.progress||0),0);tickSpeed();updateHud();renderUploadQueue();await persist();
   }
-  await Promise.all(Array.from({ length: CONC }, worker));
-  if (failed) throw new Error('部分分片失败');
-  return await api('/api/upload/' + item.sid + '/complete', { method: 'POST' });
+  check();return api('/api/upload/'+item.sid+'/complete',{method:'POST'});
 }
-
 async function kick(){
-  if (UP.running) return;
-  UP.running = true;
-  $('#hud').classList.add('show');
-  const failed = [];
-  while (UP.items.length){
-    const item = UP.items[0];
-    try {
-      const r = await uploadOne(item);
-      if (r && r.dedup) toast('已存在，秒传：' + item.name);
-      // 视频：用浏览器（能解 H.264）截一帧当封面，路由器解不了
-      if (r && r.asset && /^video\//.test(item.file.type || '')) {
-        capturePoster(item.file, r.asset).catch(() => {});
+  if(UP.running)return;UP.running=true;
+  if(!speedTimer)speedTimer=setInterval(tickSpeed,500);
+  try{
+    let item;
+    while((item=UP.items.find(t=>(t.status==='queued'||!t.status)&&(!t.user||t.user===(localStorage.getItem('lumina_user')||''))))){
+      try{
+        const result=await uploadOne(item);item.status='done';item.progress=item.size;
+        if(result.asset&&/^video\//.test(item.file.type||''))capturePoster(item.file,result.asset).catch(()=>{});
+        await idbDel(item.id);reset();
+      }catch(e){
+        if(item.status==='cancelled'){if(item.sid)await api('/api/upload/'+item.sid,{method:'DELETE'}).catch(()=>{});await idbDel(item.id);}
+        else{if(item.status!=='paused')item.status='failed';item.error=String(e);try{await idbPut(item);}catch(ignore){}}
       }
-    } catch (e){
-      console.error(e);
-      failed.push(item.name);
+      UP.doneBytes=UP.items.reduce((n,t)=>n+(t.progress||0),0);updateHud();renderUploadQueue();
     }
-    UP.items.shift();
-    await idbDel(item.id);
-    updateHud();
-    // 进度条一走完就刷新列表，不用等全部传完
-    try { reset(); } catch (e) {}
-  }
-  if (failed.length) {
-    toast('有 ' + failed.length + ' 个文件没传成功：' + failed.slice(0, 3).join('、'));
-  }
-  UP.running = false;
-  if (speedTimer){ clearInterval(speedTimer); speedTimer = null; }
-  UP.speed = 0; updateHud();
-  setTimeout(() => $('#hud').classList.remove('show'), 1600);
-
-  if (!failed.length) {
-    // 全部成功：关掉上传面板，直接回到时间轴
-    UP.doneFlash = true;
-    if ($('#mUpload').classList.contains('show')) {
-      $('#mUpload').classList.remove('show');
-      await new Promise(r => setTimeout(r, 180));
-    }
-    renderUploadQueue();
-    reset();
-    try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { window.scrollTo(0, 0); }
-    toast('上传完成，已回到相册首页');
-  } else {
-    // 有失败：留在面板上，方便看是哪几个
-    toast('有 ' + failed.length + ' 个文件没传成功');
-  }
+  }finally{UP.running=false;clearInterval(speedTimer);speedTimer=null;UP.speed=0;updateHud();renderUploadQueue();}
 }
 
 // 上传按钮：先选目标（普通 / 秘密），再打开上传面板
@@ -1638,22 +1591,18 @@ function capturePoster(src, assetId) {
 let uploadOwner = '';
 
 function renderUploadQueue(){
-  const box = $('#upQueue');
-  if (!box) return;
-  if (!UP.items.length){
-    box.innerHTML = UP.doneFlash
-      ? '<div class="up-empty">已全部上传完成</div>'
-      : '<div class="up-empty">还没有选择文件</div>';
-    return;
-  }
-  const n = Math.min(UP.items.length, 60);
-  let html = '';
-  for (let i = 0; i < n; i++){
-    const it = UP.items[i];
-    html += '<div class="up-row"><span class="nm">' + esc(it.name) + '</span><span class="sz">' + fmtB(it.size) + '</span></div>';
-  }
-  if (UP.items.length > n) html += '<div class="up-empty">还有 ' + (UP.items.length - n) + ' 个文件…</div>';
-  box.innerHTML = html;
+ const box=$('#upQueue');if(!box)return;box.replaceChildren();
+ const labels={queued:'等待上传',uploading:'上传中',paused:'已暂停',failed:'上传失败',done:'已完成',cancelled:'已取消'};
+ if(!UP.items.length){box.textContent='选择照片或视频开始上传';return;}
+ for(const it of UP.items){
+  const row=document.createElement('div');row.className='up-row';
+  const text=document.createElement('span');text.className='nm';text.textContent=it.name+' · '+(labels[it.status]||'等待上传')+' '+Math.round((it.progress||0)/it.size*100)+'%'+(it.error?' · '+it.error:'');row.append(text);
+  const action=(label,fn)=>{const b=document.createElement('button');b.textContent=label;b.onclick=fn;row.append(b);};
+  if(it.status==='uploading'||it.status==='queued')action('暂停',async()=>{it.status='paused';await idbPut(it);renderUploadQueue();});
+  if(it.status==='paused'||it.status==='failed')action('继续',async()=>{it.status='queued';it.error='';await idbPut(it);renderUploadQueue();kick();});
+  if(it.status!=='done'&&it.status!=='cancelled')action('取消',async()=>{const active=it.status==='uploading';it.status='cancelled';if(!active){if(it.sid)await api('/api/upload/'+it.sid,{method:'DELETE'}).catch(()=>{});await idbDel(it.id);}renderUploadQueue();});
+  box.append(row);
+ }
 }
 
 function updateMobileBar(){
@@ -1723,7 +1672,8 @@ async function startApp(){
 
   // 恢复上次未完成的上传
   try {
-    const pending = await idbAll();
+    const me=await api('/api/me');localStorage.setItem('lumina_user',me.user);
+    const pending = (await idbAll()).filter(t=>t.user===me.user);pending.forEach(t=>{if(t.status==='uploading')t.status='queued';});
     if (pending.length){
       UP.items = pending;
       UP.totalBytes = pending.reduce((a, i) => a + i.size, 0);
@@ -1775,7 +1725,7 @@ function openLogin(){
   $('#authToReg').textContent = '注册新账号';
   $('#authErr').textContent = '';
 }
-$('#authToReg').onclick = () => {
+$('#authToReg').onclick = () => { toast('请让管理员在家庭成员页面添加账号'); return;
   if (authMode === 'register') openLogin(); else openRegister();
 };
 

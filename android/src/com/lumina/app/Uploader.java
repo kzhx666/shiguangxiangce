@@ -96,56 +96,10 @@ public class Uploader {
 
     /** 上传一个 Uri，owner/folder/sub 由调用方给定。返回 true 表示成功或已存在。 */
     public static boolean upload(Context c, Uri u, String owner, String folder, String sub, long mtime) {
-        try {
-            String name = nameOf(c, u);
-            long size = sizeOf(c, u);
-            if (size <= 0) return false;
-            if (folder == null || folder.isEmpty()) {
-                folder = bucketOf(c, u);
-            }
-            if (mtime <= 0) {
-                mtime = mtimeOf(c, u);
-            }
-            JSONObject req = new JSONObject();
-            req.put("owner", owner);
-            req.put("name", name);
-            req.put("size", size);
-            req.put("mtime", mtime > 0 ? mtime / 1000 : 0);
-            req.put("folder", folder);
-            req.put("sub", sub);
-            req.put("secret", secretUpload);
-            JSONObject init = new JSONObject(Api.post("/api/upload/init", req.toString()));
-            if (init.optBoolean("dedup", false)) {
-                return true;
-            }
-            String sid = init.getString("sid");
-            int chunk = init.getInt("chunk");
-            int total = init.getInt("total");
-
-            InputStream in = c.getContentResolver().openInputStream(u);
-            byte[] buf = new byte[chunk];
-            for (int i = 0; i < total; i++) {
-                int len = 0;
-                while (len < chunk) {
-                    int n = in.read(buf, len, chunk - len);
-                    if (n <= 0) break;
-                    len += n;
-                }
-                if (len == 0) break;
-                Api.putChunk(sid, i, buf, len);
-            }
-            in.close();
-            String compRes = Api.post("/api/upload/" + sid + "/complete", "{}");
-            try {
-                JSONObject compObj = new JSONObject(compRes);
-                long assetId = compObj.optLong("asset", 0);
-                if (assetId > 0) Api.postAlias(assetId, name, size);
-                sendPosterIfPossible(c, u, name, assetId);
-            } catch (Throwable ignore) {}
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
+        if(folder==null||folder.isEmpty())folder=bucketOf(c,u);
+        if(sub==null)sub="";
+        if(mtime<=0)mtime=mtimeOf(c,u);
+        return Transfers.upload(c,u,owner,folder,sub,mtime,secretUpload);
     }
 
     static void sendPosterIfPossible(Context c, Uri u, String name, long assetId) {
@@ -213,6 +167,7 @@ public class Uploader {
         java.util.List<Uri> files = new java.util.ArrayList<Uri>();
         java.util.List<String> subs = new java.util.ArrayList<String>();
         walk(c, tree, "", files, subs, 0);
+        for(int i=0;i<files.size();i++)try{Transfers.prepare(c,files.get(i),owner,"",subs.get(i),0,secretUpload);}catch(Exception ignored){}
         int ok = 0;
         for (int i = 0; i < files.size(); i++) {
             if (upload(c, files.get(i), owner, "", subs.get(i), 0)) ok++;
@@ -328,16 +283,22 @@ public class Uploader {
             new Thread(new Runnable() {
                 public void run() {
                     int n = uploadTree(c, tree, owner);
-                    android.widget.Toast.makeText(c, "文件夹上传完成：" + n + " 个文件",
-                            android.widget.Toast.LENGTH_LONG).show();
+                    a.runOnUiThread(()->android.widget.Toast.makeText(c,"文件夹上传完成："+n+" 个文件",android.widget.Toast.LENGTH_LONG).show());
                 }
             }).start();
             return true;
         }
+        // Persist SAF grants so retries survive process death.
+        try {
+            if(data.getClipData()!=null)for(int i=0;i<data.getClipData().getItemCount();i++)c.getContentResolver().takePersistableUriPermission(data.getClipData().getItemAt(i).getUri(),Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            else if(data.getData()!=null)c.getContentResolver().takePersistableUriPermission(data.getData(),Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        }catch(SecurityException ignored){}
         // REQ_FILES：多选
         new Thread(new Runnable() {
             public void run() {
                 int ok = 0, all = 0;
+                try{if(data.getClipData()!=null)for(int i=0;i<data.getClipData().getItemCount();i++)Transfers.prepare(c,data.getClipData().getItemAt(i).getUri(),owner,"","",0,secretUpload);
+                else if(data.getData()!=null)Transfers.prepare(c,data.getData(),owner,"","",0,secretUpload);}catch(Exception e){a.runOnUiThread(()->Toast.makeText(c,"任务记录保存失败，请检查存储空间",1).show());return;}
                 if (data.getClipData() != null) {
                     int n = data.getClipData().getItemCount();
                     all = n;
@@ -354,8 +315,7 @@ public class Uploader {
                                 mtimeOf(c, data.getData()))) ok++;
                     } catch (Throwable ignored) { }
                 }
-                android.widget.Toast.makeText(c, "上传完成：" + ok + " / " + all,
-                        android.widget.Toast.LENGTH_LONG).show();
+                final int uploaded=ok,total=all;a.runOnUiThread(()->android.widget.Toast.makeText(c,"上传完成："+uploaded+" / "+total,android.widget.Toast.LENGTH_LONG).show());
             }
         }).start();
         return true;

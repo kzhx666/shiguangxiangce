@@ -471,6 +471,7 @@ function capturePoster(src, assetId) {
   .albumrow .fchk.on{background:var(--a1);border-color:var(--a1)}
   .albumrow .fchk.on::after{content:"";width:5px;height:9px;border:2px solid #0B0D12;border-top:0;border-left:0;transform:rotate(42deg);margin-top:-2px}
 </style>
+<link rel="stylesheet" href="/upgrade.css">
 </head>
 <body>
 <header class="topbar">
@@ -591,7 +592,7 @@ function capturePoster(src, assetId) {
       <option value="cr">绑定空间：cr 的相册</option>
     </select>
     <button class="go" id="authGo">进入</button>
-    <div class="authalt" id="authAlt"><a id="authToReg">注册新账号</a></div>
+    <div class="authalt" id="authAlt"><a id="authToReg" hidden>注册新账号</a><span>新成员请联系家庭管理员添加账号</span></div>
     <div class="who" id="authWho"></div>
   </div>
 </div>
@@ -733,5 +734,6 @@ function capturePoster(src, assetId) {
 <input type="file" id="camInput" accept="image/*" capture="environment" hidden>
 
   <script src="/app.js?v=5" defer></script>
+<script src="/upgrade.js" defer></script>
 </body>
 </html>

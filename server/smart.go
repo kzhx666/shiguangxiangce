@@ -246,18 +246,19 @@ func (s *Server) rebuildDupes() int {
 }
 
 func (s *Server) hDupes(w http.ResponseWriter, r *http.Request) {
+	clause, args := ownerIn(s.visibleOwners(r, "all"))
 	rows, err := s.st.db.Query(`SELECT dup_group, id, name, size, taken_at FROM assets
-		WHERE status='active' AND dup_group>0 ORDER BY dup_group, size DESC`)
+		WHERE status='active' AND secret=0 AND dup_group>0`+clause+` ORDER BY dup_group, size DESC`, args...)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
 	defer rows.Close()
 	type item struct {
-		ID       int64  `json:"id"`
-		Name     string `json:"name"`
-		Size     int64  `json:"size"`
-		TakenAt  int64  `json:"taken_at"`
+		ID      int64  `json:"id"`
+		Name    string `json:"name"`
+		Size    int64  `json:"size"`
+		TakenAt int64  `json:"taken_at"`
 	}
 	out := []map[string]any{}
 	curG := 0
@@ -297,11 +298,11 @@ func (s *Server) rebuildEvents() int {
 		return 0
 	}
 	type row struct {
-		id    int64
-		t     int64
-		lat   float64
-		lon   float64
-		gps   bool
+		id  int64
+		t   int64
+		lat float64
+		lon float64
+		gps bool
 	}
 	var list []row
 	for rows.Next() {
@@ -362,8 +363,9 @@ func absf(v float64) float64 {
 }
 
 func (s *Server) hEvents(w http.ResponseWriter, r *http.Request) {
+	clause, args := ownerIn(s.visibleOwners(r, "all"))
 	rows, err := s.st.db.Query(`SELECT event_id, COUNT(*) c, MIN(taken_at), MAX(taken_at), MIN(id)
-		FROM assets WHERE status='active' AND event_id>0 GROUP BY event_id ORDER BY MAX(taken_at) DESC LIMIT 60`)
+		FROM assets WHERE status='active' AND secret=0 AND event_id>0`+clause+` GROUP BY event_id ORDER BY MAX(taken_at) DESC LIMIT 60`, args...)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -377,7 +379,7 @@ func (s *Server) hEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		var lat, lon float64
 		var hasGPS int
-		_ = s.st.db.QueryRow(`SELECT lat,lon,has_gps FROM assets WHERE event_id=? AND has_gps=1 LIMIT 1`, eid).
+		_ = s.st.db.QueryRow(`SELECT lat,lon,has_gps FROM assets WHERE event_id=? AND has_gps=1 AND secret=0`+clause+` LIMIT 1`, append([]any{eid}, args...)...).
 			Scan(&lat, &lon, &hasGPS)
 		place := ""
 		if hasGPS == 1 {
@@ -398,8 +400,9 @@ func (s *Server) hEvents(w http.ResponseWriter, r *http.Request) {
 // ---------- 地点 ----------
 
 func (s *Server) hPlaces(w http.ResponseWriter, r *http.Request) {
+	clause, args := ownerIn(s.visibleOwners(r, "all"))
 	rows, err := s.st.db.Query(`SELECT lat, lon, id, taken_at FROM assets
-		WHERE status='active' AND has_gps=1 ORDER BY taken_at DESC`)
+		WHERE status='active' AND secret=0 AND has_gps=1`+clause+` ORDER BY taken_at DESC`, args...)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -442,13 +445,13 @@ func (s *Server) hPlaces(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hEdit(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID      int64   `json:"id"`
-		Bright  float64 `json:"brightness"` // -100..100
+		ID       int64   `json:"id"`
+		Bright   float64 `json:"brightness"` // -100..100
 		Contrast float64 `json:"contrast"`
-		Satur   float64 `json:"saturation"`
-		Temp    float64 `json:"temperature"`
+		Satur    float64 `json:"saturation"`
+		Temp     float64 `json:"temperature"`
 		Vignette float64 `json:"vignette"` // 0..100
-		Rotate  int     `json:"rotate"`     // 0/90/180/270
+		Rotate   int     `json:"rotate"`   // 0/90/180/270
 	}
 	if err := jsonDecode(r, &req); err != nil {
 		http.Error(w, "bad json", 400)
@@ -534,6 +537,7 @@ func fnum(v float64) string {
 func jsonDecode(r *http.Request, v any) error {
 	return json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(v)
 }
+
 // ---------- 智能重建 ----------
 
 func (s *Server) hSmartRebuild(w http.ResponseWriter, r *http.Request) {
@@ -551,4 +555,3 @@ func (s *Server) hSmartStats(w http.ResponseWriter, r *http.Request) {
 	_ = s.st.db.QueryRow(`SELECT COUNT(DISTINCT event_id) FROM assets WHERE event_id>0`).Scan(&events)
 	writeJSON(w, map[string]any{"hashed": hashed, "gps": withGps, "dup_groups": dupGroups, "events": events})
 }
-

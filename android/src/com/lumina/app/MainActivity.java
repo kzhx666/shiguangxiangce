@@ -59,6 +59,8 @@ public class MainActivity extends Activity {
     LinearLayout selBar, selBar2;
     GridAdapter adapter;
     String album = "", cursor = "", ownerFilter = "";
+    String searchText="", searchFrom="", searchTo="", searchKind="all";
+    boolean searchFav=false;
     int personId = 0;
     String personName = "";
     int tabW = 0;   // 七个 tab 平分一屏的宽度
@@ -121,13 +123,14 @@ public class MainActivity extends Activity {
                 new Thread(new Runnable() {
                     public void run() {
                         final boolean ok = Api.login(u, pw);
+                        if(ok)try{Prefs.setOwner(MainActivity.this,new JSONObject(Api.get("/api/me")).optString("space",u));}catch(Exception ignored){}
                         ui.post(new Runnable() {
                             public void run() {
                                 if (ok) {
                                     Prefs.setServer(MainActivity.this, Api.base);
                                     Prefs.setCookie(MainActivity.this, Api.cookie);
                                     Prefs.setUser(MainActivity.this, Api.user);
-                                    Prefs.setOwner(MainActivity.this, Api.user);
+
                                     recreate();
                                 } else {
                                     Toast.makeText(MainActivity.this,
@@ -190,6 +193,11 @@ public class MainActivity extends Activity {
         top.addView(peopleBtn, plp2);
         top.addView(account);
         root.addView(top);
+        LinearLayout tools=Ui.row(this);tools.setPadding(dp(12),dp(8),dp(12),dp(8));
+        TextView searchButton=Ui.chip(this,"搜索筛选");searchButton.setOnClickListener(v->searchDialog());tools.addView(searchButton);
+        TextView tasksButton=Ui.chip(this,"上传任务");tasksButton.setOnClickListener(v->startActivity(new Intent(this,TransfersActivity.class)));tools.addView(tasksButton);
+        TextView manageButton=Ui.chip(this,"成员与整理");manageButton.setOnClickListener(v->startActivity(new Intent(this,ToolsActivity.class)));tools.addView(manageButton);
+        android.widget.HorizontalScrollView toolScroll=new android.widget.HorizontalScrollView(this);toolScroll.setHorizontalScrollBarEnabled(false);toolScroll.addView(tools);root.addView(toolScroll);
 
         // 让 7 个 tab 平分一屏：屏宽 - 两侧留白 - 每个 tab 的间距
         int screenW = getResources().getDisplayMetrics().widthPixels;
@@ -610,13 +618,14 @@ public class MainActivity extends Activity {
     void reset() {
         // 去抖：短时间连续 reset 会打断长按手势，也会重复请求
         long now = System.currentTimeMillis();
-        if (now - lastResetAt < 800 && !items.isEmpty()) return;
+
         lastResetAt = now;
         // 记住当前滚动位置，重载后回到原处（否则批量操作后列表会跳回顶部）
         final int keepPos = list == null ? 0 : list.getFirstVisiblePosition();
         final android.view.View keepChild = list == null ? null : list.getChildAt(0);
         final int keepTop = keepChild == null ? 0 : keepChild.getTop();
         gen++;
+        loading=false;
         items.clear();
         rows.clear();
         cursor = "";
@@ -630,6 +639,20 @@ public class MainActivity extends Activity {
         });
     }
 
+    void searchDialog() {
+        LinearLayout form=new LinearLayout(this);form.setOrientation(1);form.setPadding(dp(20),dp(10),dp(20),dp(10));
+        EditText query=field(form,"文件名、人物、相机、城市附近",searchText,false);
+        EditText from=field(form,"起始日期 YYYY-MM-DD",searchFrom,false),to=field(form,"结束日期 YYYY-MM-DD",searchTo,false);
+        android.widget.Spinner kind=new android.widget.Spinner(this);kind.setAdapter(new android.widget.ArrayAdapter<String>(this,android.R.layout.simple_spinner_dropdown_item,new String[]{"全部类型","照片","视频"}));kind.setSelection(searchKind.equals("photo")?1:searchKind.equals("video")?2:0);form.addView(kind);
+        android.widget.CheckBox fav=new android.widget.CheckBox(this);fav.setText("只看收藏");fav.setTextColor(0xffeff6ff);fav.setChecked(searchFav);form.addView(fav);
+        final android.content.SharedPreferences saved=getSharedPreferences("filters",MODE_PRIVATE);
+        TextView restore=Ui.chip(this,"读取上次筛选");form.addView(restore);restore.setOnClickListener(v->{try{JSONObject f=new JSONObject(saved.getString(Api.user,"{}"));query.setText(f.optString("q"));from.setText(f.optString("from"));to.setText(f.optString("to"));fav.setChecked(f.optBoolean("fav"));kind.setSelection(f.optInt("kind"));}catch(Exception ignored){}});
+        new AlertDialog.Builder(this).setTitle("查找照片").setView(form).setPositiveButton("搜索并记住",(d,w)->{
+            searchText=query.getText().toString().trim();searchFrom=from.getText().toString();searchTo=to.getText().toString();searchFav=fav.isChecked();searchKind=new String[]{"all","photo","video"}[kind.getSelectedItemPosition()];
+            try{JSONObject f=new JSONObject();f.put("q",searchText).put("from",searchFrom).put("to",searchTo).put("fav",searchFav).put("kind",kind.getSelectedItemPosition());saved.edit().putString(Api.user,f.toString()).apply();}catch(Exception ignored){}reset();
+        }).setNeutralButton("清除",(d,w)->{searchText=searchFrom=searchTo="";searchKind="all";searchFav=false;reset();}).setNegativeButton("取消",null).show();
+    }
+
     void load() {
         if (loading || done) return;
         loading = true;
@@ -638,6 +661,10 @@ public class MainActivity extends Activity {
             public void run() {
                 try {
                     StringBuilder q = new StringBuilder("/api/timeline?limit=120");
+                    q.append("&q=").append(java.net.URLEncoder.encode(searchText,"UTF-8"));
+                    q.append("&from=").append(java.net.URLEncoder.encode(searchFrom,"UTF-8"));
+                    q.append("&to=").append(java.net.URLEncoder.encode(searchTo,"UTF-8"));
+                    q.append("&kind=").append(searchKind);if(searchFav)q.append("&fav=1");
                     if (!album.isEmpty())
                         // 服务器上 folder 才是"文件夹名"过滤；album 是相册 id（整数）
                         q.append("&folder=").append(java.net.URLEncoder.encode(album, "UTF-8"));
@@ -657,6 +684,7 @@ public class MainActivity extends Activity {
                     final String next = o.optString("next", "");
                     ui.post(new Runnable() {
                         public void run() {
+                            if(myGen!=gen)return;
                             loading = false;
                             if (fresh.isEmpty() || next.isEmpty()) done = true;
                             cursor = next;
@@ -673,6 +701,7 @@ public class MainActivity extends Activity {
                 } catch (final Exception e) {
                     ui.post(new Runnable() {
                         public void run() {
+                            if(myGen!=gen)return;
                             loading = false;
                             status.setText("加载失败：" + e.getMessage());
                         }
@@ -715,7 +744,8 @@ public class MainActivity extends Activity {
         int vids = 0;
         for (JSONObject o : items) if ("video".equals(o.optString("kind"))) vids++;
         status.setText(items.size() + " 项" + (vids > 0 ? " · " + vids + " 视频" : "")
-                + (done ? "" : " · 加载中…"));
+                + (done ? "" : " · 下滑加载更多"));
+        if(done && items.isEmpty())status.setText("没有匹配的照片 · 可调整搜索条件或上传照片");
     }
 
     void clearSel() {

@@ -1,15 +1,19 @@
-﻿# 拾光 App 构建脚本（零依赖，只用 Android SDK 的命令行工具）
+# 拾光 App 构建脚本（零依赖，只用 Android SDK 的命令行工具）
 # 用法：在 PowerShell 里执行  .\build.ps1
 $ErrorActionPreference = 'Stop'
 
 $proj = $PSScriptRoot
-$sdk  = "C:\Users\Administrator\AppData\Local\Android\Sdk"
+$sdk = $env:ANDROID_HOME
+if (-not $sdk) { $sdk = $env:ANDROID_SDK_ROOT }
+if (-not $sdk) { $sdk = Join-Path $env:LOCALAPPDATA 'Android\Sdk' }
 $bt   = Join-Path $sdk "build-tools\36.0.0"
 $jar  = Join-Path $sdk "platforms\android-36\android.jar"
+$localJar=Join-Path $proj "..\.tools\android-platform.jar"
+if(Test-Path $localJar){$jar=(Resolve-Path $localJar).Path}
 $build = Join-Path $proj "build"
-$ks    = Join-Path $proj "lumina-release.jks"
-$ksPass = $env:LUMINA_KS_PASS
-if (-not $ksPass) { throw "请先设置环境变量 LUMINA_KS_PASS（keystore 口令）" }
+$ks = if ($env:LUMINA_KEYSTORE) { $env:LUMINA_KEYSTORE } else { Join-Path $proj "lumina-release.jks" }
+if (-not $env:LUMINA_KS_PASS) { throw "请设置 LUMINA_KS_PASS（签名密钥口令）" }
+if (-not $env:LUMINA_KEY_PASS) { $env:LUMINA_KEY_PASS = $env:LUMINA_KS_PASS }
 
 foreach ($p in @($bt, $jar)) { if (-not (Test-Path $p)) { throw "缺少 SDK 组件: $p" } }
 
@@ -43,8 +47,8 @@ if ($LASTEXITCODE -ne 0) { throw "aapt2 link 失败" }
 
 # 3) 编译 Java
 $srcs = Get-ChildItem (Join-Path $proj "src") -Recurse -Filter *.java | ForEach-Object { $_.FullName }
-& javac -source 8 -target 8 -nowarn -Xlint:none -bootclasspath $jar -d (Join-Path $build "classes") @srcs 2>&1 |
-    Where-Object { $_ -match 'error|错误' } | ForEach-Object { Write-Host $_ }
+& javac -encoding UTF-8 --release 8 -nowarn -Xlint:none -classpath $jar -d (Join-Path $build "classes") @srcs 2>&1 |
+    ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { throw "javac 失败" }
 
 # 4) dex
@@ -77,7 +81,7 @@ if ($LASTEXITCODE -ne 0) { throw "zipalign 失败" }
 
 $final = Join-Path $build "lumina.apk"
 if (-not (Test-Path $ks)) { throw "缺少签名文件: $ks" }
-& (Join-Path $bt "apksigner.bat") sign --ks $ks --ks-pass "pass:$ksPass" --key-pass "pass:$ksPass" `
+& (Join-Path $bt "apksigner.bat") sign --ks $ks --ks-pass env:LUMINA_KS_PASS --key-pass env:LUMINA_KEY_PASS `
     --out $final $aligned
 if ($LASTEXITCODE -ne 0) { throw "apksigner 失败" }
 

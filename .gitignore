@@ -1,4 +1,4 @@
-﻿# 拾光 · 家庭照片云
+# 拾光 · 家庭照片云
 依赖：Go 1.23+ / Android SDK build-tools / PowerShell 7
 *.exe
 *.apk
@@ -19,3 +19,17 @@ node_modules/
 Thumbs.db
 __pycache__/
 *.pyc
+
+# Local tools, credentials, diagnostics and private media
+.tools/
+.probe/
+.publish/
+.upgrade-backup/
+release/
+.env
+.env.*
+*.db-shm
+*.db.gz
+*.pid
+*.pem
+*.key

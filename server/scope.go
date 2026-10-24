@@ -9,18 +9,22 @@ import (
 // 家庭共享空间对所有家庭成员可见，个人空间只有本人可见。
 func ownerScope(user string) []string {
 	if user == "admin" {
-		return []string{"lwm", "cr", "family"}
+		return allOwnerIDs()
 	}
 	sp := spaceForUser(user)
-	switch sp {
-	case "cr":
-		return []string{"cr", "family"}
-	case "lwm":
-		return []string{"lwm", "family"}
-	case "family":
-		return []string{"family"}
+	spaceMu.RLock()
+	shared := memberShared[user]
+	spaceMu.RUnlock()
+	if sp == "family" {
+		if shared {
+			return []string{"family"}
+		}
+		return nil
 	}
-	return []string{"family"}
+	if shared {
+		return []string{sp, "family"}
+	}
+	return []string{sp}
 }
 
 func canSee(user, owner string) bool {
@@ -50,10 +54,14 @@ func ownerIn(owners []string) (string, []any) {
 	}
 	return " AND owner IN (" + ph + ")", args
 }
+
 // visibleOwners 计算本次请求允许的 owner 集合。
 // 请求里指定了具体空间时，只有该空间在当前用户的可见范围内才生效。
 func (s *Server) visibleOwners(r *http.Request, want string) []string {
 	allowed := ownerScope(userOf(r))
+	if len(allowed) == 0 {
+		return []string{"__none__"}
+	}
 	if want == "" || want == "all" {
 		return allowed
 	}

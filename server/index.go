@@ -41,7 +41,7 @@ func (s *Server) Scan() ScanResult {
 	start := time.Now()
 	var res ScanResult
 
-	for _, o := range owners {
+	for _, o := range ownerDefs() {
 		dir := filepath.Join(s.cfg.Root, o.Dir)
 		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
 			continue

@@ -14,34 +14,34 @@ import (
 
 // Asset 是索引中的一条媒体记录。
 type Asset struct {
-	ID        int64  `json:"id"`
-	Owner     string `json:"owner"`
-	Kind      string `json:"kind"`
-	RelPath   string `json:"rel_path"`
-	Name      string `json:"name"`
-	Size      int64  `json:"size"`
-	MTime     int64  `json:"mtime"`
-	Mime      string `json:"mime"`
-	Sha256    string `json:"sha256"`
-	W         int    `json:"w"`
-	H         int    `json:"h"`
-	Orient    int    `json:"orient"`
-	TakenAt   int64  `json:"taken_at"`
-	YearMonth string `json:"year_month"`
-	Camera    string `json:"camera"`
-	Lens      string `json:"lens"`
-	Aperture  string `json:"aperture"`
-	ISO       int    `json:"iso"`
-	Focal     string `json:"focal"`
+	ID        int64   `json:"id"`
+	Owner     string  `json:"owner"`
+	Kind      string  `json:"kind"`
+	RelPath   string  `json:"rel_path"`
+	Name      string  `json:"name"`
+	Size      int64   `json:"size"`
+	MTime     int64   `json:"mtime"`
+	Mime      string  `json:"mime"`
+	Sha256    string  `json:"sha256"`
+	W         int     `json:"w"`
+	H         int     `json:"h"`
+	Orient    int     `json:"orient"`
+	TakenAt   int64   `json:"taken_at"`
+	YearMonth string  `json:"year_month"`
+	Camera    string  `json:"camera"`
+	Lens      string  `json:"lens"`
+	Aperture  string  `json:"aperture"`
+	ISO       int     `json:"iso"`
+	Focal     string  `json:"focal"`
 	Duration  float64 `json:"duration"`
 	Lat       float64 `json:"lat"`
 	Lon       float64 `json:"lon"`
-	HasGPS    bool   `json:"has_gps"`
-	Fav       int    `json:"fav"`
-	Status    string `json:"status"`
-	Missing   bool   `json:"missing"`
-	Folder    string `json:"folder"`
-	Sub       string `json:"sub"`
+	HasGPS    bool    `json:"has_gps"`
+	Fav       int     `json:"fav"`
+	Status    string  `json:"status"`
+	Missing   bool    `json:"missing"`
+	Folder    string  `json:"folder"`
+	Sub       string  `json:"sub"`
 }
 
 type Bucket struct {
@@ -113,6 +113,9 @@ func OpenStore(path string) (*Store, error) {
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(0)
+	if _, err := db.Exec(schema); err != nil {
+		return nil, err
+	}
 	// 老库补列（SQLite 没有 ADD COLUMN IF NOT EXISTS，重复执行会报错，忽略）
 	_, _ = db.Exec(`ALTER TABLE assets ADD COLUMN folder TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE assets ADD COLUMN sub TEXT NOT NULL DEFAULT ''`)
@@ -120,9 +123,6 @@ func OpenStore(path string) (*Store, error) {
 	_, _ = db.Exec(`ALTER TABLE assets ADD COLUMN missing INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE assets ADD COLUMN missing_since INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE assets ADD COLUMN nothumb INTEGER NOT NULL DEFAULT 0`)
-	if _, err := db.Exec(schema); err != nil {
-		return nil, err
-	}
 	// 索引：照片多了以后，翻页/分组都靠这几个索引，否则每次全表扫描
 	// 同一份内容可能以不同文件名上传（比如相册封面/重命名后的文件），
 	// 去重后只保留一个资产，这里记住所有出现过的「文件名+大小」，
@@ -194,16 +194,19 @@ func (s *Store) Count() (n int) {
 // ---- 时间轴查询（键集分页）----
 
 type TimelineFilter struct {
-	Folder   string
-	Owner    string
-	Owners   []string // 非空时按集合过滤，优先于 Owner
-	Kind     string
-	BeforeAt int64
-	BeforeID int64
-	Limit    int
-	Person   int64
-	Album    int64
-	Secret   int    // 1 = 只看秘密相册；0 = 只看普通相册
+	Query         string
+	From, To      int64
+	Favorites     bool
+	Folder        string
+	Owner         string
+	Owners        []string // 非空时按集合过滤，优先于 Owner
+	Kind          string
+	BeforeAt      int64
+	BeforeID      int64
+	Limit         int
+	Person        int64
+	Album         int64
+	Secret        int  // 1 = 只看秘密相册；0 = 只看普通相册
 	ExcludeFamily bool // true = 排除共享空间（普通/秘密分区用）
 }
 
@@ -249,6 +252,31 @@ func (s *Store) TimelineFiltered(f TimelineFilter) ([]Asset, error) {
 	if f.Album > 0 {
 		q += ` AND id IN (SELECT asset FROM album_items WHERE album=?)`
 		args = append(args, f.Album)
+	}
+
+	if f.Query != "" {
+		q += ` AND (instr(lower(name),lower(?))>0 OR instr(lower(folder),lower(?))>0 OR instr(lower(camera),lower(?))>0 OR instr(lower(lens),lower(?))>0 OR id IN (SELECT f.asset FROM faces f JOIN people p ON p.id=f.person WHERE instr(lower(p.name),lower(?))>0)`
+		for i := 0; i < 5; i++ {
+			args = append(args, f.Query)
+		}
+		for _, c := range cities {
+			if strings.Contains(c.Name, f.Query) {
+				q += ` OR (has_gps=1 AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?)`
+				args = append(args, c.Lat-0.6, c.Lat+0.6, c.Lon-0.6, c.Lon+0.6)
+			}
+		}
+		q += `)`
+	}
+	if f.From > 0 {
+		q += ` AND taken_at>=?`
+		args = append(args, f.From)
+	}
+	if f.To > 0 {
+		q += ` AND taken_at<?`
+		args = append(args, f.To)
+	}
+	if f.Favorites {
+		q += ` AND fav=1`
 	}
 	if f.BeforeAt > 0 {
 		q += ` AND (taken_at < ? OR (taken_at = ? AND id < ?))`

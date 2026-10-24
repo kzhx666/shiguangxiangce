@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -40,17 +39,6 @@ func toolVersion(bin string) (string, error) {
 	}
 	line := strings.SplitN(string(out), "\n", 2)[0]
 	return truncate(strings.TrimSpace(line), 60), nil
-}
-
-func diskFree(path string) (freeGB, totalGB float64) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(path, &st); err != nil {
-		return 0, 0
-	}
-	bs := float64(st.Bsize)
-	freeGB = float64(st.Bavail) * bs / (1 << 30)
-	totalGB = float64(st.Blocks) * bs / (1 << 30)
-	return
 }
 
 func dirSize(path string) int64 {
@@ -128,7 +116,7 @@ func (s *Server) runChecks() []checkResult {
 
 	// 7. 目录结构
 	missing := []string{}
-	for _, o := range owners {
+	for _, o := range ownerDefs() {
 		p := filepath.Join(s.cfg.Root, o.Dir)
 		if _, err := os.Stat(p); err != nil {
 			missing = append(missing, o.Dir)

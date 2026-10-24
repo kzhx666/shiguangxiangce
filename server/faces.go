@@ -94,8 +94,9 @@ func (s *Server) hFacesPending(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
+	clause, args := ownerIn(s.visibleOwners(r, "all"))
 	rows, err := s.st.db.Query(`SELECT id FROM assets
-		WHERE status='active' AND kind='photo' AND face_done=0 ORDER BY taken_at DESC LIMIT ?`, limit)
+		WHERE status='active' AND secret=0 AND kind='photo' AND face_done=0`+clause+` ORDER BY taken_at DESC LIMIT ?`, append(args, limit)...)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -109,7 +110,7 @@ func (s *Server) hFacesPending(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var remain int
-	_ = s.st.db.QueryRow(`SELECT COUNT(*) FROM assets WHERE status='active' AND kind='photo' AND face_done=0`).Scan(&remain)
+	_ = s.st.db.QueryRow(`SELECT COUNT(*) FROM assets WHERE status='active' AND secret=0 AND kind='photo' AND face_done=0`+clause, args...).Scan(&remain)
 	writeJSON(w, map[string]any{"ids": ids, "remaining": remain})
 }
 
@@ -119,6 +120,19 @@ func (s *Server) hFacesSubmit(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		http.Error(w, "bad id", 400)
+		return
+	}
+	a, e := s.st.Get(id)
+	if e != nil || !canSee(userOf(r), a.Owner) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	peopleMu.Lock()
+	defer peopleMu.Unlock()
+	var already int
+	_ = s.st.db.QueryRow(`SELECT face_done FROM assets WHERE id=?`, id).Scan(&already)
+	if already != 0 {
+		writeJSON(w, map[string]any{"ok": true})
 		return
 	}
 	var req struct {
@@ -162,78 +176,10 @@ func (s *Server) hFacesSubmit(w http.ResponseWriter, r *http.Request) {
 
 const faceSimThreshold = 0.50 // 余弦相似度阈值
 
-func (s *Server) rebuildPeople() int {
-	rows, err := s.st.db.Query(`SELECT id, asset, emb FROM faces ORDER BY id`)
-	if err != nil {
-		return 0
-	}
-	type rec struct {
-		id    int64
-		asset int64
-		v     []float32
-	}
-	var list []rec
-	for rows.Next() {
-		var id, asset int64
-		var blob []byte
-		if rows.Scan(&id, &asset, &blob) == nil {
-			if v := bytesToVec(blob); len(v) > 0 {
-				list = append(list, rec{id, asset, v})
-			}
-		}
-	}
-	rows.Close()
-
-	type cluster struct {
-		cent  []float32
-		faces []int64
-		cover int64
-	}
-	var cl []*cluster
-	for _, f := range list {
-		best := -1
-		bestSim := float32(-1)
-		for i, c := range cl {
-			sim := dot(c.cent, f.v)
-			if sim > bestSim {
-				bestSim, best = sim, i
-			}
-		}
-		if best >= 0 && bestSim >= faceSimThreshold {
-			c := cl[best]
-			for i := range c.cent {
-				c.cent[i] = (c.cent[i]*float32(len(c.faces)) + f.v[i]) / float32(len(c.faces)+1)
-			}
-			c.faces = append(c.faces, f.id)
-		} else {
-			cl = append(cl, &cluster{cent: append([]float32(nil), f.v...), faces: []int64{f.id}, cover: f.id})
-		}
-	}
-
-	tx, _ := s.st.db.Begin()
-	_, _ = tx.Exec(`DELETE FROM people`)
-	_, _ = tx.Exec(`UPDATE faces SET person=0`)
-	kept := 0
-	for _, c := range cl {
-		if len(c.faces) < 2 {
-			continue // 单张人脸的聚类意义不大，先不入库
-		}
-		kept++
-		res, err := tx.Exec(`INSERT INTO people(cover,cnt,created) VALUES(?,?,?)`, c.cover, len(c.faces), time.Now().Unix())
-		if err != nil {
-			continue
-		}
-		pid, _ := res.LastInsertId()
-		for _, fid := range c.faces {
-			_, _ = tx.Exec(`UPDATE faces SET person=? WHERE id=?`, pid, fid)
-		}
-	}
-	_ = tx.Commit()
-	return kept
-}
-
 func (s *Server) hPeople(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.st.db.Query(`SELECT id, name, cover, cnt FROM people ORDER BY cnt DESC LIMIT 100`)
+
+	clause, args := ownerIn(s.visibleOwners(r, "all"))
+	rows, err := s.st.db.Query(`SELECT p.id,p.name,MIN(f.id),COUNT(*) FROM people p JOIN faces f ON f.person=p.id JOIN assets a ON a.id=f.asset WHERE a.status='active' AND a.secret=0`+clause+` GROUP BY p.id ORDER BY COUNT(*) DESC LIMIT 500`, args...)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -249,7 +195,7 @@ func (s *Server) hPeople(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{"id": id, "name": name, "cover": cover, "count": cnt})
 	}
 	var total int
-	_ = s.st.db.QueryRow(`SELECT COUNT(*) FROM assets WHERE face_done=1`).Scan(&total)
+	_ = s.st.db.QueryRow(`SELECT COUNT(*) FROM assets WHERE face_done=1 AND secret=0`+clause, args...).Scan(&total)
 	writeJSON(w, map[string]any{"people": out, "scanned": total})
 }
 
@@ -260,6 +206,10 @@ func (s *Server) hPeopleRebuild(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hPeopleName(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if !s.mayEditPerson(r, id) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
 	var req struct {
 		Name string `json:"name"`
 	}
@@ -362,6 +312,11 @@ func (s *Server) hFaceImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", 400)
 		return
 	}
+	var owner string
+	if s.st.db.QueryRow(`SELECT a.owner FROM faces f JOIN assets a ON a.id=f.asset WHERE f.id=? AND a.secret=0 AND a.status='active'`, id).Scan(&owner) != nil || !canSee(userOf(r), owner) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
 	p, err := s.ensureFaceImage(id)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -383,7 +338,8 @@ func (s *Server) hFaceImage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hPersonAssets(w http.ResponseWriter, r *http.Request) {
 	pid, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	rows, err := s.st.db.Query(`SELECT DISTINCT asset FROM faces WHERE person=? LIMIT 200`, pid)
+	clause, args := ownerIn(s.visibleOwners(r, "all"))
+	rows, err := s.st.db.Query(`SELECT DISTINCT f.asset FROM faces f JOIN assets a ON a.id=f.asset WHERE person=? AND a.secret=0 AND a.status='active'`+clause+` LIMIT 200`, append([]any{pid}, args...)...)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return

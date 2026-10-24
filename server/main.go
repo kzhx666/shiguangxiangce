@@ -1,18 +1,18 @@
 package main
 
 import (
-	"runtime/debug"
-	"io"
 	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,22 +24,22 @@ import (
 var webAssets embed.FS
 
 type Config struct {
-	Root      string
-	DataDir   string
-	CacheDir  string
-	Addr      string
-	ThumbConc int
+	Root        string
+	DataDir     string
+	CacheDir    string
+	Addr        string
+	ThumbConc   int
 	UploadChunk int64
 }
 
 type Server struct {
 	forceScan bool
-	cfg     Config
-	st      *Store
-	locks   [64]sync.Mutex
-	flocks  [64]sync.Mutex // 视频取帧独立锁，避免和缩略图抢同一把锁
-	queue   chan int64
-	started time.Time
+	cfg       Config
+	st        *Store
+	locks     [64]sync.Mutex
+	flocks    [64]sync.Mutex // 视频取帧独立锁，避免和缩略图抢同一把锁
+	queue     chan int64
+	started   time.Time
 }
 
 type ownerDef struct{ Dir, Owner, Label string }
@@ -116,6 +116,9 @@ func main() {
 	}
 	srv.migrateUserSpace()
 	srv.ensureAdmin()
+	if err := srv.ensureMembers(); err != nil {
+		log.Fatal(err)
+	}
 	srv.loadSpaces()
 	if err := srv.ensureFamilyTables(); err != nil {
 		log.Fatalf("family tables: %v", err)
@@ -129,9 +132,9 @@ func main() {
 		os.Exit(srv.printDoctor())
 	}
 	srv.StartWorkers(cfg.ThumbConc)
-	srv.startDBBackup()   // 数据库每日备份（只备份索引，几 MB）
+	srv.startDBBackup() // 数据库每日备份（只备份索引，几 MB）
 	go srv.backupLoop()
-	go srv.warmLoop()   // 后台慢慢补缩略图，翻到哪都是现成的
+	go srv.warmLoop() // 后台慢慢补缩略图，翻到哪都是现成的
 	go func() {
 		time.Sleep(2 * time.Second)
 		srv.fixBadTimes()
@@ -173,6 +176,12 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /api/members", srv.hMembers)
+	mux.HandleFunc("POST /api/members", srv.hMemberSave)
+	mux.HandleFunc("POST /api/people/merge", srv.hPeopleMerge)
+	mux.HandleFunc("POST /api/people/split", srv.hPeopleSplit)
+	mux.HandleFunc("GET /api/people/{id}/faces", srv.hPersonFaces)
 	mux.HandleFunc("GET /api/health", srv.hHealth)
 	mux.HandleFunc("GET /api/stats", srv.hStats)
 	mux.HandleFunc("GET /api/config", srv.hConfig)
@@ -249,7 +258,7 @@ func main() {
 	files := http.FileServerFS(sub)
 	mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 单文件 SPA：HTML 必须每次回源，否则升级后浏览器还在跑旧脚本
-		if r.URL.Path == "/" || r.URL.Path == "/index.html" || r.URL.Path == "/app.js" {
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" || r.URL.Path == "/app.js" || r.URL.Path == "/upgrade.js" || r.URL.Path == "/upgrade.css" {
 			w.Header().Set("Cache-Control", "no-store, must-revalidate")
 		} else {
 			w.Header().Set("Cache-Control", "public, max-age=604800")
@@ -317,7 +326,7 @@ func (s *Server) hHealth(w http.ResponseWriter, r *http.Request) {
 		"uptime_s":  int64(time.Since(s.started).Seconds()),
 		"db":        s.st.Count(),
 		"last_scan": s.st.GetMeta("last_scan"),
-		"version":   "2.0.0-p1",
+		"version":   "2.1.0",
 	})
 }
 
@@ -341,7 +350,7 @@ func (s *Server) hConfig(w http.ResponseWriter, r *http.Request) {
 		Label string `json:"label"`
 	}
 	out := []o{}
-	for _, x := range owners {
+	for _, x := range ownerDefs() {
 		if canSee(userOf(r), x.Owner) {
 			out = append(out, o{x.Owner, x.Label})
 		}
@@ -383,10 +392,11 @@ func (s *Server) hTimeline(w http.ResponseWriter, r *http.Request) {
 	excludeFamily := q.Get("owner") != "family"
 	items, err := s.st.TimelineFiltered(TimelineFilter{
 		ExcludeFamily: excludeFamily,
-		Folder: q.Get("folder"),
-		Owners: s.visibleOwners(r, q.Get("owner")), Kind: q.Get("kind"),
+		Folder:        q.Get("folder"),
+		Owners:        s.visibleOwners(r, q.Get("owner")), Kind: q.Get("kind"),
 		BeforeAt: at, BeforeID: id, Limit: limit,
 		Person: person, Album: album, Secret: secret,
+		Query: strings.TrimSpace(q.Get("q")), From: searchDate(q.Get("from"), false), To: searchDate(q.Get("to"), true), Favorites: q.Get("fav") == "1",
 	})
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -525,7 +535,7 @@ func (s *Server) hFolders(w http.ResponseWriter, r *http.Request) {
 	// ?owner=family 时只列共享空间里的文件夹。
 	// 注意：这种情况下不能再叠加 visibleOwners 的 owner IN (...) 条件，
 	// 否则会变成 owner='family' AND owner IN ('lwm')，永远查不到东西。
-	ownerCond := ` AND owner<>'family'`   // 普通文件夹列表不掺入共享空间
+	ownerCond := ` AND owner<>'family'` // 普通文件夹列表不掺入共享空间
 	if ow := r.URL.Query().Get("owner"); ow != "" {
 		ownerCond = ` AND owner=?`
 		args = []any{ow}
@@ -555,6 +565,7 @@ func (s *Server) hFolders(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{"folders": list, "secret": r.URL.Query().Get("secret") == "1"})
 }
+
 // hFolderDelete 删除一个文件夹分区：其中的照片移入回收站（可恢复），并清掉分区标记。
 // hFolderDeleteJSON 用 JSON 传名字，避免路径编码把空格变成 + 导致匹配不上。
 func (s *Server) hFolderDeleteJSON(w http.ResponseWriter, r *http.Request) {
@@ -629,6 +640,7 @@ func (s *Server) deleteFolderFor(w http.ResponseWriter, r *http.Request, name st
 	_, _ = s.st.db.Exec(`UPDATE assets SET folder='', sub='' WHERE folder=?`+clause, append([]any{name}, args...)...)
 	writeJSON(w, map[string]any{"ok": true, "moved": moved, "failed": failed})
 }
+
 // hPurgeMany 批量彻底删除（回收站多选）。
 func (s *Server) hPurgeMany(w http.ResponseWriter, r *http.Request) {
 	ids, err := decodeIDs(r)
@@ -644,6 +656,7 @@ func (s *Server) hPurgeMany(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{"ok": true, "purged": n})
 }
+
 // hSecretFolder 把整个文件夹分区移入/移出秘密相册。
 func (s *Server) hSecretFolder(w http.ResponseWriter, r *http.Request) {
 	var req struct {

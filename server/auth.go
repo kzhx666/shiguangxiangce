@@ -1,7 +1,6 @@
 package main
 
 import (
-	"sync"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -12,8 +11,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -176,7 +177,7 @@ func (s *Server) hLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hMe(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"user": r.Header.Get("X-Lumina-User")})
+	writeJSON(w, map[string]any{"user": r.Header.Get("X-Lumina-User"), "space": spaceForUser(userOf(r)), "admin": userOf(r) == "admin"})
 }
 
 func (s *Server) sessionUser(tok string) (string, bool) {
@@ -197,7 +198,7 @@ func (s *Server) isPublic(r *http.Request) bool {
 	switch {
 	case p == "/" || p == "/index.html" || p == "/favicon.ico":
 		return true
-	case p == "/app.js" || p == "/land.json" || p == "/favicon.png":
+	case p == "/upgrade.js" || p == "/upgrade.css" || p == "/app.js" || p == "/land.json" || p == "/favicon.png":
 		return true
 		return true
 	case strings.HasPrefix(p, "/s/"):
@@ -207,8 +208,6 @@ func (s *Server) isPublic(r *http.Request) bool {
 	case r.Method == "GET" && p == "/api/health":
 		return true
 	case r.Method == "GET" && p == "/api/setup-state":
-		return true
-	case r.Method == "POST" && p == "/api/register":
 		return true
 	case r.Method == "POST" && p == "/api/setup":
 		return true
@@ -297,10 +296,11 @@ func (s *Server) ensureAdmin() {
 		log.Printf("已创建管理员账号 admin（初始密码见 LUMINA_ADMIN_PW 环境变量）")
 	}
 }
+
 // ---------- 账号空间映射 ----------
 
 var (
-	spaceMu sync.RWMutex
+	spaceMu     sync.RWMutex
 	spaceOfUser = map[string]string{}
 )
 
@@ -335,50 +335,8 @@ func spaceForUser(name string) string {
 
 // hRegister 注册新账号，可选绑定到某个空间。
 func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Name  string `json:"name"`
-		Pass  string `json:"password"`
-		Space string `json:"space"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-		http.Error(w, `{"error":"bad json"}`, 400)
-		return
-	}
-	name := strings.TrimSpace(req.Name)
-	if len(name) < 2 || len(name) > 24 {
-		http.Error(w, `{"error":"账号长度需 2-24 位"}`, 400)
-		return
-	}
-	for _, ch := range name {
-		if !(ch == '_' || ch == '-' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) {
-			http.Error(w, `{"error":"账号只能包含字母数字下划线"}`, 400)
-			return
-		}
-	}
-	if len(req.Pass) < 4 {
-		http.Error(w, `{"error":"密码至少 4 位"}`, 400)
-		return
-	}
-	space := req.Space
-	if space != "lwm" && space != "cr" && space != "family" {
-		space = "family"
-	}
-	var n int
-	_ = s.st.db.QueryRow(`SELECT COUNT(*) FROM users WHERE name=?`, name).Scan(&n)
-	if n > 0 {
-		http.Error(w, `{"error":"这个账号已存在"}`, 409)
-		return
-	}
-	if _, err := s.st.db.Exec(`INSERT INTO users(name,pw,space,created) VALUES(?,?,?,?)`,
-		name, hashPassword(req.Pass), space, time.Now().Unix()); err != nil {
-		http.Error(w, `{"error":"创建失败"}`, 500)
-		return
-	}
-	spaceMu.Lock()
-	spaceOfUser[name] = space
-	spaceMu.Unlock()
-	log.Printf("register: %s -> space %s", name, space)
-	writeJSON(w, map[string]any{"ok": true, "user": name, "space": space})
+	s.hMemberSave(w, r)
+	return
 }
 
 // firstAdminPassword 首次建库时的管理员初始密码。
