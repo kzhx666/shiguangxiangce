@@ -27,6 +27,10 @@ public class FolderActivity extends Activity {
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
+        secretMode = getIntent().getBooleanExtra("secret", false);
+        ownerMode = getIntent().getStringExtra("owner");
+        if (ownerMode == null) ownerMode = "";
+
         Api.base = Prefs.server(this);
         Api.cookie = Prefs.cookie(this);
 
@@ -94,9 +98,6 @@ public class FolderActivity extends Activity {
         box.setPadding(20, 0, 20, 0);
         root.addView(box);
 
-        secretMode = getIntent().getBooleanExtra("secret", false);
-        ownerMode = getIntent().getStringExtra("owner");
-        if (ownerMode == null) ownerMode = "";
         load();
     }
 
@@ -217,6 +218,7 @@ public class FolderActivity extends Activity {
 
     void deleteSelected() {
         if (selFolder.isEmpty()) return;
+        final java.util.List<String> targets = new java.util.ArrayList<String>(selFolder);
         new android.app.AlertDialog.Builder(this)
                 .setTitle("删除 " + selFolder.size() + " 个文件夹？")
                 .setMessage("文件夹里的照片会一起移入回收站，30 天内可恢复。")
@@ -227,7 +229,7 @@ public class FolderActivity extends Activity {
                                 try {
                                     org.json.JSONObject req = new org.json.JSONObject();
                                     org.json.JSONArray arr = new org.json.JSONArray();
-                                    for (String n : selFolder) arr.put(n);
+                                    for (String n : targets) arr.put(n);
                                     req.put("folders", arr);
                                     String url = "/api/folders/delete"
                                                 + (ownerMode.equals("family") ? "?owner=family" : "");
@@ -236,6 +238,7 @@ public class FolderActivity extends Activity {
                                     ui.post(new Runnable() { public void run() {
                                         android.widget.Toast.makeText(FolderActivity.this, msg,
                                                 android.widget.Toast.LENGTH_LONG).show();
+                                        MainActivity.dataDirty = true;
                                         selFolder.clear();
                                         selBar.setVisibility(View.GONE);
                                         load();
@@ -256,19 +259,21 @@ public class FolderActivity extends Activity {
     /** 把选中的文件夹整块移入秘密相册。 */
     void secretSelected() {
         if (selFolder.isEmpty()) return;
+        final boolean toSecret = !secretMode;
+        final java.util.List<String> targets = new java.util.ArrayList<String>(selFolder);
         new android.app.AlertDialog.Builder(this)
-                .setTitle("移入秘密相册？")
-                .setMessage("选中的 " + selFolder.size() + " 个文件夹里的照片会藏进秘密相册")
-                .setPositiveButton("移入", new android.content.DialogInterface.OnClickListener() {
+                .setTitle(toSecret ? "移入秘密相册？" : "移出秘密相册？")
+                .setMessage("选中的 " + targets.size() + " 个文件夹里的照片将" + (toSecret ? "移入秘密相册" : "移回普通相册"))
+                .setPositiveButton(toSecret ? "移入" : "移出", new android.content.DialogInterface.OnClickListener() {
                     public void onClick(android.content.DialogInterface d, int w) {
                         new Thread(new Runnable() {
                             public void run() {
                                 int ok = 0;
-                                for (String n : selFolder) {
+                                for (String n : targets) {
                                     try {
                                         org.json.JSONObject req = new org.json.JSONObject();
                                         req.put("name", n);
-                                        req.put("secret", true);
+                                        req.put("secret", toSecret);
                                         String r = Api.post("/api/secret/folder", req.toString());
                                         if (r.contains("\"ok\":true")) ok++;
                                     } catch (Throwable ignored) { }
@@ -276,8 +281,9 @@ public class FolderActivity extends Activity {
                                 final int okf = ok;
                                 ui.post(new Runnable() { public void run() {
                                     android.widget.Toast.makeText(FolderActivity.this,
-                                            "已移入 " + okf + " 个文件夹",
+                                            (toSecret ? "已移入 " : "已移出 ") + okf + "/" + targets.size() + " 个文件夹",
                                             android.widget.Toast.LENGTH_LONG).show();
+                                    MainActivity.dataDirty = true;
                                     selFolder.clear();
                                     selBar.setVisibility(View.GONE);
                                     load();

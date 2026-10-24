@@ -751,6 +751,7 @@ public class MainActivity extends Activity {
     void clearSel() {
         sel.clear();
         selBar.setVisibility(View.GONE);
+        selBar2.setVisibility(View.GONE);
         adapter.notifyDataSetChanged();
     }
 
